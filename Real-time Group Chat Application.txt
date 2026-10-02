@@ -1,0 +1,1308 @@
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { 
+  Send, Smile, Plus, Users, Copy, Check, LogOut, MessageSquare, 
+  BarChart2, HelpCircle, Sparkles, Shield, Wifi, WifiOff, ChevronRight, 
+  AlertCircle, X, Heart, ThumbsUp, Laugh, Flame, RefreshCw, Radio, Share2, Menu
+} from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  getFirestore, collection, doc, setDoc, addDoc, updateDoc, 
+  onSnapshot, getDocs, deleteDoc, serverTimestamp 
+} from 'firebase/firestore';
+
+const getFirebaseConfig = () => {
+  try {
+    if (typeof __firebase_config !== 'undefined' && __firebase_config) {
+      return typeof __firebase_config === 'string' ? JSON.parse(__firebase_config) : __firebase_config;
+    }
+  } catch (e) {
+    console.error("Firebase config parse error:", e);
+  }
+  return {
+    apiKey: "demo-api-key",
+    authDomain: "demo-app.firebaseapp.com",
+    projectId: "demo-app",
+    storageBucket: "demo-app.appspot.com",
+    messagingSenderId: "123456789",
+    appId: "1:123456789:web:demo"
+  };
+};
+
+const firebaseConfig = getFirebaseConfig();
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'production-group-chat-app';
+
+const generateRoomCode = () => {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const part = (len) => Array.from({ length: len }, () => chars.charAt(Math.floor(Math.random() * chars.length))).join('');
+  return `${part(4)}-${part(4)}-${part(4)}`;
+};
+
+const ICEBREAKER_QUESTIONS = [
+  "ถ้าสามารถขอพรได้ 1 ข้อทันที จะขออะไร?",
+  "อาหารมื้อล่าสุดที่คุณกินแล้วรู้สึกอร่อยสุดๆ คืออะไร?",
+  "ภาพยนตร์หรือซีรีส์เรื่องโปรดที่ชอบดูซ้ำมากที่สุดคืออะไร?",
+  "ถ้าเลือกไปเที่ยวที่ไหนก็ได้ในโลกนี้ฟรี 1 สัปดาห์ จะไปที่ไหน?",
+  "สิ่งแรกที่คุณจะทำถ้าถูกลอตเตอรี่รางวัลที่ 1 คืออะไร?",
+  "เพลงไหนฟังทีไรก็ทำให้อารมณ์ดีขึ้นทันที?",
+  "ซูเปอร์พาวเวอร์แบบไหนที่คุณอยากมีมากที่สุด?"
+];
+
+const EMOJI_LIST = ["😊", "😂", "🥰", "😍", "😎", "🔥", "❤️", "👍", "🎉", "✨", "🙌", "🤔", "🥺", "💀", "💩", "🚀"];
+const REACTION_EMOJIS = ["❤️", "👍", "😂", "🔥", "😮", "🎉"];
+
+export default function App() {
+  // Navigation & User State
+  const [screen, setScreen] = useState('welcome'); // welcome | create | join | room
+  const [userName, setUserName] = useState(() => localStorage.getItem('chat_username') || '');
+  const [user, setUser] = useState(null);
+  const [userId, setUserId] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
+
+  // Room & Connection State
+  const [currentRoom, setCurrentRoom] = useState(null);
+  const [roomCodeInput, setRoomCodeInput] = useState('');
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
+  const [toastMsg, setToastMsg] = useState('');
+
+  // Real-time Collections Data
+  const [messages, setMessages] = useState([]);
+  const [presenceList, setPresenceList] = useState([]);
+  const [polls, setPolls] = useState([]);
+  const [activeEffect, setActiveEffect] = useState(null);
+
+  // Chat Input & UI State
+  const [messageInput, setMessageInput] = useState('');
+  const [isTyping, setIsTyping] = useState(false);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [showPollModal, setShowPollModal] = useState(false);
+  const [showMembersDrawer, setShowMembersDrawer] = useState(false);
+  const [showLeaveModal, setShowLeaveModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  
+  // Poll creation form
+  const [pollQuestion, setPollQuestion] = useState('');
+  const [pollOptions, setPollOptions] = useState(['', '']);
+
+  const messagesEndRef = useRef(null);
+  const typingTimeoutRef = useRef(null);
+
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error("Auth init error:", err);
+      }
+    };
+
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      if (u) setUserId(u.uid);
+      setAuthReady(true);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleUrlCode = () => {
+      const hash = window.location.hash;
+      const search = window.location.search;
+      let codeFromUrl = '';
+
+      if (hash.includes('code=')) {
+        codeFromUrl = hash.split('code=')[1]?.split('&')[0];
+      } else if (search.includes('code=')) {
+        const params = new URLSearchParams(search);
+        codeFromUrl = params.get('code');
+      }
+
+      if (codeFromUrl) {
+        const cleanCode = codeFromUrl.trim().toUpperCase();
+        setRoomCodeInput(cleanCode);
+        showToast(`ได้รับรหัสห้อง ${cleanCode} จากลิงก์เชิญแล้ว`);
+      }
+    };
+
+    handleUrlCode();
+  }, []);
+
+  const showToast = (msg) => {
+    setToastMsg(msg);
+    setTimeout(() => setToastMsg(''), 3500);
+  };
+
+  useEffect(() => {
+    if (!user || !currentRoom) return;
+
+    // 1. Subscribe to Messages
+    const msgsRef = collection(db, 'artifacts', appId, 'public', 'data', 'messages');
+    const unsubMsgs = onSnapshot(msgsRef, (snapshot) => {
+      const allMsgs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      const roomMsgs = allMsgs
+        .filter(m => m.roomId === currentRoom.id)
+        .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+      setMessages(roomMsgs);
+    }, (err) => console.error("Messages sync error:", err));
+
+    // 2. Subscribe to Presence & Typing Status
+    const presenceRef = collection(db, 'artifacts', appId, 'public', 'data', 'presence');
+    const unsubPresence = onSnapshot(presenceRef, (snapshot) => {
+      const allPresence = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      const now = Date.now();
+      const activeInRoom = allPresence.filter(p => p.roomId === currentRoom.id && (now - p.lastSeen < 15000));
+      setPresenceList(activeInRoom);
+    }, (err) => console.error("Presence sync error:", err));
+
+    // 3. Subscribe to Polls
+    const pollsRef = collection(db, 'artifacts', appId, 'public', 'data', 'polls');
+    const unsubPolls = onSnapshot(pollsRef, (snapshot) => {
+      const allPolls = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      const roomPolls = allPolls.filter(p => p.roomId === currentRoom.id);
+      setPolls(roomPolls);
+    }, (err) => console.error("Polls sync error:", err));
+
+    // 4. Subscribe to Synced Room Effects
+    const effectsRef = collection(db, 'artifacts', appId, 'public', 'data', 'effects');
+    const unsubEffects = onSnapshot(effectsRef, (snapshot) => {
+      const allEffects = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      const roomEffects = allEffects.filter(e => e.roomId === currentRoom.id && (Date.now() - e.timestamp < 4000));
+      if (roomEffects.length > 0) {
+        const latest = roomEffects[roomEffects.length - 1];
+        setActiveEffect(latest);
+        setTimeout(() => setActiveEffect(null), 3000);
+      }
+    }, (err) => console.error("Effects sync error:", err));
+
+    return () => {
+      unsubMsgs();
+      unsubPresence();
+      unsubPolls();
+      unsubEffects();
+    };
+  }, [user, currentRoom]);
+
+  useEffect(() => {
+    if (!user || !currentRoom || !userId || !userName) return;
+
+    const updatePresence = async (typing = false) => {
+      try {
+        const pDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'presence', `${userId}_${currentRoom.id}`);
+        await setDoc(pDocRef, {
+          userId,
+          name: userName,
+          roomId: currentRoom.id,
+          lastSeen: Date.now(),
+          isTyping: typing
+        }, { merge: true });
+      } catch (err) {
+        console.error("Presence heartbeat error:", err);
+      }
+    };
+
+    updatePresence(isTyping);
+    const interval = setInterval(() => updatePresence(isTyping), 5000);
+
+    return () => clearInterval(interval);
+  }, [user, currentRoom, userId, userName, isTyping]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  const handleCreateRoom = async () => {
+    if (!userName.trim()) {
+      setErrorMsg('กรุณาใส่ชื่อของคุณก่อนสร้างห้อง');
+      return;
+    }
+    if (!user) {
+      setErrorMsg('ระบบกำลังเตรียมความพร้อม กรุณาลองใหม่อีกครั้ง');
+      return;
+    }
+
+    setLoading(true);
+    setErrorMsg('');
+    localStorage.setItem('chat_username', userName.trim());
+
+    try {
+      const roomCode = generateRoomCode();
+      const roomsRef = collection(db, 'artifacts', appId, 'public', 'data', 'rooms');
+      
+      const newRoomData = {
+        code: roomCode,
+        createdBy: userId,
+        createdByName: userName.trim(),
+        createdAt: Date.now(),
+        name: `ห้องคุยสนุกของ ${userName.trim()}`
+      };
+
+      const docRef = await addDoc(roomsRef, newRoomData);
+      const roomObj = { id: docRef.id, ...newRoomData };
+
+      // Send system message
+      const msgsRef = collection(db, 'artifacts', appId, 'public', 'data', 'messages');
+      await addDoc(msgsRef, {
+        roomId: docRef.id,
+        senderId: 'system',
+        senderName: 'ระบบ',
+        text: `🎉 ${userName.trim()} สร้างห้องแชทแล้ว! รหัสห้องคือ: ${roomCode}`,
+        createdAt: Date.now(),
+        isSystem: true
+      });
+
+      setCurrentRoom(roomObj);
+      setScreen('room');
+      showToast('สร้างห้องสำเร็จเรียบร้อย!');
+    } catch (err) {
+      console.error("Error creating room:", err);
+      setErrorMsg('ไม่สามารถสร้างห้องได้ กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleJoinRoom = async () => {
+    if (!userName.trim()) {
+      setErrorMsg('กรุณากรอกชื่อของคุณก่อนเข้าร่วมห้อง');
+      return;
+    }
+    const cleanCode = roomCodeInput.trim().toUpperCase();
+    if (!cleanCode) {
+      setErrorMsg('กรุณากรอกรหัสห้อง (Room Code)');
+      return;
+    }
+    if (!user) {
+      setErrorMsg('กำลังเชื่อมต่อเซิร์ฟเวอร์ กรุณาลองอีกครั้ง');
+      return;
+    }
+
+    setLoading(true);
+    setErrorMsg('');
+    localStorage.setItem('chat_username', userName.trim());
+
+    try {
+      const roomsRef = collection(db, 'artifacts', appId, 'public', 'data', 'rooms');
+      const snapshot = await getDocs(roomsRef);
+      const allRooms = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      
+      const foundRoom = allRooms.find(r => r.code?.toUpperCase() === cleanCode);
+
+      if (!foundRoom) {
+        setErrorMsg('ไม่พบห้องที่ตรงกับรหัสนี้ กรุณาตรวจสอบรหัสห้องอีกครั้ง');
+        setLoading(false);
+        return;
+      }
+
+      // Send join notification message
+      const msgsRef = collection(db, 'artifacts', appId, 'public', 'data', 'messages');
+      await addDoc(msgsRef, {
+        roomId: foundRoom.id,
+        senderId: 'system',
+        senderName: 'ระบบ',
+        text: `🟢 ${userName.trim()} เข้าร่วมห้องแชทแล้ว`,
+        createdAt: Date.now(),
+        isSystem: true
+      });
+
+      setCurrentRoom(foundRoom);
+      setScreen('room');
+      showToast(`เข้าสู่ ${foundRoom.name} แล้ว`);
+    } catch (err) {
+      console.error("Error joining room:", err);
+      setErrorMsg('เกิดข้อผิดพลาดในการดึงข้อมูลห้อง กรุณาลองใหม่');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSendMessage = async (e) => {
+    e?.preventDefault();
+    const text = messageInput.trim();
+    if (!text || !currentRoom || !user) return;
+
+    setMessageInput('');
+    setIsTyping(false);
+    setShowEmojiPicker(false);
+
+    try {
+      const msgsRef = collection(db, 'artifacts', appId, 'public', 'data', 'messages');
+      await addDoc(msgsRef, {
+        roomId: currentRoom.id,
+        senderId: userId,
+        senderName: userName,
+        text: text,
+        createdAt: Date.now(),
+        reactions: {}
+      });
+    } catch (err) {
+      console.error("Error sending message:", err);
+      showToast('ส่งข้อความไม่สำเร็จ กรุณาเช็คการเชื่อมต่อ');
+    }
+  };
+
+  const handleTyping = (e) => {
+    setMessageInput(e.target.value);
+    if (!isTyping) setIsTyping(true);
+
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = setTimeout(() => setIsTyping(false), 2500);
+  };
+
+  const handleToggleReaction = async (messageId, reactionEmoji) => {
+    if (!user || !currentRoom) return;
+
+    try {
+      const msgRef = doc(db, 'artifacts', appId, 'public', 'data', 'messages', messageId);
+      const targetMsg = messages.find(m => m.id === messageId);
+      if (!targetMsg) return;
+
+      const currentReactions = targetMsg.reactions || {};
+      const emojiUsers = currentReactions[reactionEmoji] || [];
+
+      let updatedUsers;
+      if (emojiUsers.includes(userId)) {
+        updatedUsers = emojiUsers.filter(id => id !== userId);
+      } else {
+        updatedUsers = [...emojiUsers, userId];
+      }
+
+      const updatedReactions = {
+        ...currentReactions,
+        [reactionEmoji]: updatedUsers
+      };
+
+      await updateDoc(msgRef, { reactions: updatedReactions });
+    } catch (err) {
+      console.error("Error toggling reaction:", err);
+    }
+  };
+
+  const handleCreatePoll = async () => {
+    if (!pollQuestion.trim()) {
+      showToast('กรุณาระบุคำถามสำหรับโพล');
+      return;
+    }
+    const validOptions = pollOptions.filter(o => o.trim() !== '');
+    if (validOptions.length < 2) {
+      showToast('ต้องมีอย่างน้อย 2 ตัวเลือก');
+      return;
+    }
+
+    try {
+      const pollsRef = collection(db, 'artifacts', appId, 'public', 'data', 'polls');
+      await addDoc(pollsRef, {
+        roomId: currentRoom.id,
+        createdBy: userId,
+        createdByName: userName,
+        question: pollQuestion.trim(),
+        options: validOptions.map((optText, index) => ({ id: index, text: optText, votes: [] })),
+        createdAt: Date.now()
+      });
+
+      setPollQuestion('');
+      setPollOptions(['', '']);
+      setShowPollModal(false);
+      showToast('สร้างโพลสำเร็จ!');
+    } catch (err) {
+      console.error("Error creating poll:", err);
+      showToast('ไม่สามารถสร้างโพลได้');
+    }
+  };
+
+  const handleVotePoll = async (pollId, optionIndex) => {
+    if (!user) return;
+
+    try {
+      const pollRef = doc(db, 'artifacts', appId, 'public', 'data', 'polls', pollId);
+      const targetPoll = polls.find(p => p.id === pollId);
+      if (!targetPoll) return;
+
+      const updatedOptions = targetPoll.options.map((option, idx) => {
+        // Remove vote from other options if single vote desired
+        const cleanVotes = option.votes.filter(uid => uid !== userId);
+        if (idx === optionIndex) {
+          cleanVotes.push(userId);
+        }
+        return { ...option, votes: cleanVotes };
+      });
+
+      await updateDoc(pollRef, { options: updatedOptions });
+      showToast('บันทึกผลโหวตแล้ว');
+    } catch (err) {
+      console.error("Error voting poll:", err);
+    }
+  };
+
+  const handleSendRandomQuestion = async () => {
+    if (!currentRoom || !user) return;
+
+    const randomIdx = Math.floor(Math.random() * ICEBREAKER_QUESTIONS.length);
+    const qText = ICEBREAKER_QUESTIONS[randomIdx];
+
+    try {
+      const msgsRef = collection(db, 'artifacts', appId, 'public', 'data', 'messages');
+      await addDoc(msgsRef, {
+        roomId: currentRoom.id,
+        senderId: 'system',
+        senderName: '🎲 คำถามสุ่ม',
+        text: `คำถามสุ่มฮิต: "${qText}"`,
+        createdAt: Date.now(),
+        isIcebreaker: true
+      });
+      showToast('สุ่มคำถามลงแชทเรียบร้อย!');
+    } catch (err) {
+      console.error("Error sending random question:", err);
+    }
+  };
+
+  const handleTriggerEffect = async (effectType) => {
+    if (!currentRoom || !user) return;
+
+    try {
+      const effectsRef = collection(db, 'artifacts', appId, 'public', 'data', 'effects');
+      await addDoc(effectsRef, {
+        roomId: currentRoom.id,
+        type: effectType,
+        senderName: userName,
+        timestamp: Date.now()
+      });
+      showToast(`ส่ง Effect ${effectType} ให้ทุกคนในห้อง!`);
+    } catch (err) {
+      console.error("Error triggering effect:", err);
+    }
+  };
+
+  const handleCopyInviteLink = () => {
+    if (!currentRoom) return;
+    const inviteUrl = `${window.location.origin}${window.location.pathname}#code=${currentRoom.code}`;
+    
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(inviteUrl);
+      showToast('คัดลอกลิงก์เชิญเรียบร้อยแล้ว!');
+    } else {
+      showToast(`รหัสห้อง: ${currentRoom.code}`);
+    }
+  };
+
+  const handleConfirmLeave = async () => {
+    if (currentRoom && user) {
+      try {
+        const msgsRef = collection(db, 'artifacts', appId, 'public', 'data', 'messages');
+        await addDoc(msgsRef, {
+          roomId: currentRoom.id,
+          senderId: 'system',
+          senderName: 'ระบบ',
+          text: `🔴 ${userName} ออกจากห้องแชทแล้ว`,
+          createdAt: Date.now(),
+          isSystem: true
+        });
+
+        const pDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'presence', `${userId}_${currentRoom.id}`);
+        await deleteDoc(pDocRef);
+      } catch (err) {
+        console.error("Error leaving room:", err);
+      }
+    }
+
+    setCurrentRoom(null);
+    setScreen('welcome');
+    setShowLeaveModal(false);
+    showToast('ออกจากห้องแล้ว');
+  };
+
+  const typingUsers = useMemo(() => {
+    return presenceList.filter(p => p.userId !== userId && p.isTyping);
+  }, [presenceList, userId]);
+
+  const renderEffectOverlay = () => {
+    if (!activeEffect) return null;
+
+    const emojiMap = {
+      'hearts': ['❤️', '💖', '💗', '💓', '💕'],
+      'party': ['🎉', '🥳', '🎈', '🎊', '🎁'],
+      'sparkles': ['✨', '⭐', '🌟', '💫', '⚡'],
+      'fire': ['🔥', '💥', '⚡', '💣', '🌶️']
+    };
+
+    const icons = emojiMap[activeEffect.type] || ['✨', '❤️', '🎉'];
+
+    return (
+      <div className="fixed inset-0 pointer-events-none z-50 overflow-hidden flex items-center justify-center">
+        <div className="bg-slate-900/80 backdrop-blur-md px-6 py-3 rounded-full border border-pink-500/50 text-white font-medium text-sm shadow-2xl animate-bounce mb-32">
+          {activeEffect.senderName} ส่ง Effect {icons[0]}
+        </div>
+        <div className="absolute inset-0 flex justify-around items-center">
+          {[...Array(20)].map((_, i) => (
+            <div
+              key={i}
+              className="animate-ping text-4xl sm:text-6xl absolute"
+              style={{
+                top: `${Math.random() * 80 + 10}%`,
+                left: `${Math.random() * 80 + 10}%`,
+                animationDuration: `${1 + Math.random() * 1.5}s`,
+                animationIterationCount: 'infinite'
+              }}
+            >
+              {icons[i % icons.length]}
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans antialiased selection:bg-pink-500 selection:text-white">
+      {/* Real-time Connection Offline Warning Banner */}
+      {!isOnline && (
+        <div className="bg-amber-500 text-slate-950 text-xs sm:text-sm font-semibold px-4 py-2 text-center flex items-center justify-center gap-2 shadow-lg sticky top-0 z-50">
+          <WifiOff className="w-4 h-4 animate-pulse" />
+          <span>อินเทอร์เน็ตขาดการเชื่อมต่อ... กำลังเชื่อมต่อใหม่</span>
+        </div>
+      )}
+
+      {/* Global Toast Notification */}
+      {toastMsg && (
+        <div className="fixed top-4 right-4 z-50 bg-pink-600 text-white px-4 py-2.5 rounded-2xl shadow-xl flex items-center gap-2 text-sm font-medium animate-slide-in border border-pink-400/30">
+          <Sparkles className="w-4 h-4 text-pink-200" />
+          <span>{toastMsg}</span>
+        </div>
+      )}
+
+      {renderEffectOverlay()}
+
+      {/* Main Container */}
+      <main className="flex-1 flex flex-col items-center justify-center p-3 sm:p-6 max-w-5xl mx-auto w-full">
+        
+        {/* SCREEN 1: WELCOME SCREEN */}
+        {screen === 'welcome' && (
+          <div className="w-full max-w-md bg-slate-900/90 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl backdrop-blur-xl relative overflow-hidden">
+            <div className="absolute -top-24 -right-24 w-48 h-48 bg-pink-500/10 rounded-full blur-3xl pointer-events-none" />
+            <div className="absolute -bottom-24 -left-24 w-48 h-48 bg-blue-500/10 rounded-full blur-3xl pointer-events-none" />
+
+            <div className="text-center mb-8">
+              <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-tr from-pink-500 to-blue-600 text-white mb-4 shadow-lg shadow-pink-500/20">
+                <MessageSquare className="w-8 h-8" />
+              </div>
+              <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-white mb-2">
+                ยินดีต้อนรับ 💙
+              </h1>
+              <p className="text-slate-400 text-xs sm:text-sm">
+                เข้าสู่ห้องแชทกลุ่มแบบ Real-time ร่วมพูดคุยกับเพื่อนได้ทันที
+              </p>
+            </div>
+
+            {errorMsg && (
+              <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-red-400 text-xs sm:text-sm flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{errorMsg}</span>
+              </div>
+            )}
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
+                  ชื่อของคุณ
+                </label>
+                <input
+                  type="text"
+                  placeholder="เช่น กัน, เพื่อน"
+                  value={userName}
+                  onChange={(e) => {
+                    setUserName(e.target.value);
+                    if (errorMsg) setErrorMsg('');
+                  }}
+                  maxLength={20}
+                  className="w-full bg-slate-800/80 border border-slate-700 focus:border-pink-500 focus:ring-2 focus:ring-pink-500/20 rounded-2xl px-4 py-3 text-white placeholder-slate-500 text-sm outline-none transition"
+                />
+              </div>
+
+              <div className="pt-2 space-y-3">
+                <button
+                  type="button"
+                  disabled={!userName.trim() || !authReady}
+                  onClick={() => {
+                    setErrorMsg('');
+                    setScreen('create');
+                  }}
+                  className="w-full bg-gradient-to-r from-blue-600 to-pink-600 hover:from-blue-500 hover:to-pink-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold py-3.5 px-4 rounded-2xl shadow-lg shadow-pink-500/15 transition flex items-center justify-center gap-2 text-sm"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>สร้างห้อง</span>
+                </button>
+
+                <button
+                  type="button"
+                  disabled={!userName.trim() || !authReady}
+                  onClick={() => {
+                    setErrorMsg('');
+                    setScreen('join');
+                  }}
+                  className="w-full bg-slate-800 hover:bg-slate-700/80 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 font-semibold py-3.5 px-4 rounded-2xl border border-slate-700 transition flex items-center justify-center gap-2 text-sm"
+                >
+                  <Users className="w-4 h-4" />
+                  <span>เข้าร่วมห้อง</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-8 text-center text-xs text-slate-500 flex items-center justify-center gap-1.5">
+              <Shield className="w-3.5 h-3.5 text-pink-500" />
+              <span>Real-time Sync Active • ไม่ต้องลงทะเบียน</span>
+            </div>
+          </div>
+        )}
+
+        {/* SCREEN 2: CREATE ROOM */}
+        {screen === 'create' && (
+          <div className="w-full max-w-md bg-slate-900/90 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl backdrop-blur-xl">
+            <div className="flex items-center gap-3 mb-6">
+              <button
+                type="button"
+                onClick={() => setScreen('welcome')}
+                className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+              <h2 className="text-xl font-bold text-white">สร้างห้องแชทใหม่</h2>
+            </div>
+
+            {errorMsg && (
+              <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-red-400 text-xs sm:text-sm flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{errorMsg}</span>
+              </div>
+            )}
+
+            <div className="space-y-4">
+              <div className="p-4 bg-slate-800/50 rounded-2xl border border-slate-700/50 text-xs text-slate-300 space-y-2">
+                <p className="font-semibold text-pink-400">⚡ สิ่งที่จะเกิดขึ้นเมื่อกดสร้างห้อง:</p>
+                <ul className="list-disc list-inside space-y-1 text-slate-400">
+                  <li>สร้าง Room Code สุ่มความปลอดภัยสูง</li>
+                  <li>เพิ่มคุณ <span className="text-white font-medium">({userName})</span> เป็นเจ้าของห้อง</li>
+                  <li>สามารถส่ง Invite Link ให้เพื่อนเข้าแชทได้ทันที</li>
+                </ul>
+              </div>
+
+              <button
+                type="button"
+                disabled={loading}
+                onClick={handleCreateRoom}
+                className="w-full bg-gradient-to-r from-pink-600 to-blue-600 hover:from-pink-500 hover:to-blue-500 disabled:opacity-50 text-white font-semibold py-3.5 px-4 rounded-2xl shadow-lg transition flex items-center justify-center gap-2 text-sm"
+              >
+                {loading ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>กำลังติดต่อเซิร์ฟเวอร์...</span>
+                  </>
+                ) : (
+                  <>
+                    <Plus className="w-4 h-4" />
+                    <span>ยืนยันสร้างห้องแชท</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* SCREEN 3: JOIN ROOM */}
+        {screen === 'join' && (
+          <div className="w-full max-w-md bg-slate-900/90 border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl backdrop-blur-xl">
+            <div className="flex items-center gap-3 mb-6">
+              <button
+                type="button"
+                onClick={() => setScreen('welcome')}
+                className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+              <h2 className="text-xl font-bold text-white">เข้าร่วมห้องแชท</h2>
+            </div>
+
+            {errorMsg && (
+              <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-red-400 text-xs sm:text-sm flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{errorMsg}</span>
+              </div>
+            )}
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
+                  รหัสห้อง (Room Code)
+                </label>
+                <input
+                  type="text"
+                  placeholder="เช่น X7K9-PQ42-M8ZT"
+                  value={roomCodeInput}
+                  onChange={(e) => {
+                    setRoomCodeInput(e.target.value.toUpperCase());
+                    if (errorMsg) setErrorMsg('');
+                  }}
+                  className="w-full bg-slate-800/80 border border-slate-700 focus:border-pink-500 focus:ring-2 focus:ring-pink-500/20 rounded-2xl px-4 py-3 text-white placeholder-slate-500 text-sm font-mono tracking-wider outline-none transition uppercase"
+                />
+              </div>
+
+              <button
+                type="button"
+                disabled={loading || !roomCodeInput.trim()}
+                onClick={handleJoinRoom}
+                className="w-full bg-gradient-to-r from-blue-600 to-pink-600 hover:from-blue-500 hover:to-pink-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold py-3.5 px-4 rounded-2xl shadow-lg transition flex items-center justify-center gap-2 text-sm"
+              >
+                {loading ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>กำลังตรวจสอบรหัสห้อง...</span>
+                  </>
+                ) : (
+                  <>
+                    <ChevronRight className="w-4 h-4" />
+                    <span>เข้าร่วมห้อง</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* SCREEN 4: CHAT ROOM MAIN INTERFACE */}
+        {screen === 'room' && currentRoom && (
+          <div className="w-full h-[88vh] max-h-[850px] bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl flex flex-col overflow-hidden relative">
+            
+            {/* CHAT HEADER */}
+            <header className="px-4 py-3 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between gap-2 backdrop-blur-md shrink-0">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-pink-500 to-blue-600 flex items-center justify-center text-white font-bold shrink-0 shadow-md">
+                  {currentRoom.name?.charAt(0) || 'C'}
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-sm sm:text-base font-bold text-white truncate">
+                    {currentRoom.name}
+                  </h3>
+                  <div className="flex items-center gap-2 text-xs text-slate-400">
+                    <span className="font-mono bg-slate-800 px-1.5 py-0.5 rounded text-pink-400 border border-slate-700">
+                      {currentRoom.code}
+                    </span>
+                    <span>•</span>
+                    <button
+                      type="button"
+                      onClick={() => setShowMembersDrawer(true)}
+                      className="hover:text-pink-400 transition flex items-center gap-1"
+                    >
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                      <span>{presenceList.length} ออนไลน์</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Header Actions */}
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={handleCopyInviteLink}
+                  title="คัดลอกลิงก์เชิญ"
+                  className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition flex items-center gap-1 text-xs font-medium"
+                >
+                  <Share2 className="w-4 h-4 text-pink-400" />
+                  <span className="hidden sm:inline">ชวนเพื่อน</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowSettingsModal(true)}
+                  className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition"
+                  title="ข้อมูลห้อง"
+                >
+                  <Radio className="w-4 h-4" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowLeaveModal(true)}
+                  className="p-2 rounded-xl bg-red-500/10 hover:bg-red-500/20 text-red-400 transition"
+                  title="ออกจากห้อง"
+                >
+                  <LogOut className="w-4 h-4" />
+                </button>
+              </div>
+            </header>
+
+            {/* CHAT MESSAGES BODY */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-950/40">
+              
+              {/* Polls Active Section */}
+              {polls.length > 0 && (
+                <div className="space-y-3 mb-4">
+                  {polls.map((poll) => {
+                    const totalVotes = poll.options.reduce((acc, opt) => acc + (opt.votes?.length || 0), 0);
+                    return (
+                      <div key={poll.id} className="p-4 bg-slate-900 border border-pink-500/30 rounded-2xl shadow-lg space-y-3">
+                        <div className="flex items-center justify-between text-xs text-pink-400 font-semibold">
+                          <span className="flex items-center gap-1">
+                            <BarChart2 className="w-3.5 h-3.5" /> 📊 โพลโดย {poll.createdByName}
+                          </span>
+                          <span>{totalVotes} โหวต</span>
+                        </div>
+                        <h4 className="text-sm font-bold text-white">{poll.question}</h4>
+                        <div className="space-y-2">
+                          {poll.options.map((option, idx) => {
+                            const optVotes = option.votes?.length || 0;
+                            const pct = totalVotes > 0 ? Math.round((optVotes / totalVotes) * 100) : 0;
+                            const hasVoted = option.votes?.includes(userId);
+
+                            return (
+                              <button
+                                key={idx}
+                                type="button"
+                                onClick={() => handleVotePoll(poll.id, idx)}
+                                className={`w-full text-left p-2.5 rounded-xl border text-xs relative overflow-hidden transition ${
+                                  hasVoted 
+                                    ? 'border-pink-500 bg-pink-500/10 text-white font-medium' 
+                                    : 'border-slate-800 bg-slate-800/50 hover:bg-slate-800 text-slate-300'
+                                }`}
+                              >
+                                <div 
+                                  className="absolute top-0 bottom-0 left-0 bg-pink-500/20 transition-all"
+                                  style={{ width: `${pct}%` }}
+                                />
+                                <div className="relative z-10 flex items-center justify-between">
+                                  <span>{option.text} {hasVoted && '✓'}</span>
+                                  <span className="font-mono text-slate-400">{pct}% ({optVotes})</span>
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Messages Listing */}
+              {messages.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-center p-6 text-slate-500">
+                  <MessageSquare className="w-12 h-12 mb-3 text-slate-700" />
+                  <p className="text-sm font-medium text-slate-400">ยังไม่มีข้อความในห้องนี้</p>
+                  <p className="text-xs mt-1">พิมพ์ข้อความแรกเพื่อเริ่มการสนทนาได้เลย!</p>
+                </div>
+              ) : (
+                messages.map((msg) => {
+                  const isMe = msg.senderId === userId;
+                  const isSys = msg.isSystem;
+                  const isIcebreaker = msg.isIcebreaker;
+
+                  if (isSys) {
+                    return (
+                      <div key={msg.id} className="flex justify-center my-2">
+                        <span className="bg-slate-800/80 text-slate-400 text-xs px-3 py-1.5 rounded-full border border-slate-700/50">
+                          {msg.text}
+                        </span>
+                      </div>
+                    );
+                  }
+
+                  if (isIcebreaker) {
+                    return (
+                      <div key={msg.id} className="p-3.5 bg-gradient-to-r from-blue-900/40 to-pink-900/40 border border-blue-500/30 rounded-2xl my-2 text-center">
+                        <div className="text-xs text-blue-400 font-semibold mb-1 flex items-center justify-center gap-1">
+                          <HelpCircle className="w-3.5 h-3.5" /> 🎲 คำถามสุ่มสร้างบรรยากาศ
+                        </div>
+                        <p className="text-sm font-medium text-white">{msg.text}</p>
+                      </div>
+                    );
+                  }
+
+                  return (
+                    <div
+                      key={msg.id}
+                      className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} group`}
+                    >
+                      <span className="text-[10px] text-slate-400 mb-1 px-1">
+                        {msg.senderName}
+                      </span>
+                      
+                      <div className="relative max-w-[85%] sm:max-w-[70%]">
+                        <div
+                          className={`p-3.5 rounded-2xl text-sm leading-relaxed break-words shadow-md ${
+                            isMe
+                              ? 'bg-gradient-to-r from-blue-600 to-pink-600 text-white rounded-br-none'
+                              : 'bg-slate-800 text-slate-100 rounded-bl-none border border-slate-700/60'
+                          }`}
+                        >
+                          {msg.text}
+                        </div>
+
+                        {/* Reaction Pickers Bar */}
+                        <div className="flex items-center gap-1 mt-1 opacity-80 group-hover:opacity-100 transition">
+                          {REACTION_EMOJIS.map((emoji) => {
+                            const reactionUsers = msg.reactions?.[emoji] || [];
+                            const count = reactionUsers.length;
+                            const isMyReaction = reactionUsers.includes(userId);
+
+                            return (
+                              <button
+                                key={emoji}
+                                type="button"
+                                onClick={() => handleToggleReaction(msg.id, emoji)}
+                                className={`text-xs px-1.5 py-0.5 rounded-full border transition flex items-center gap-0.5 ${
+                                  isMyReaction
+                                    ? 'bg-pink-500/20 border-pink-500 text-pink-300'
+                                    : 'bg-slate-900/80 border-slate-800 text-slate-400 hover:text-white'
+                                }`}
+                              >
+                                <span>{emoji}</span>
+                                {count > 0 && <span className="text-[10px] font-mono">{count}</span>}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+
+              {/* Typing Indicators */}
+              {typingUsers.length > 0 && (
+                <div className="flex items-center gap-2 text-xs text-pink-400 italic font-medium px-2 py-1">
+                  <div className="flex gap-1">
+                    <span className="w-1.5 h-1.5 bg-pink-400 rounded-full animate-bounce" />
+                    <span className="w-1.5 h-1.5 bg-pink-400 rounded-full animate-bounce [animation-delay:0.2s]" />
+                    <span className="w-1.5 h-1.5 bg-pink-400 rounded-full animate-bounce [animation-delay:0.4s]" />
+                  </div>
+                  <span>
+                    {typingUsers.map(u => u.name).join(', ')} กำลังพิมพ์...
+                  </span>
+                </div>
+              )}
+
+              <div ref={messagesEndRef} />
+            </div>
+
+            {/* QUICK FEATURE BUTTONS TOOLBAR */}
+            <div className="px-3 py-2 bg-slate-900/95 border-t border-slate-800/80 flex items-center gap-2 overflow-x-auto shrink-0 no-scrollbar">
+              <button
+                type="button"
+                onClick={handleSendRandomQuestion}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-medium border border-slate-700/60 shrink-0 flex items-center gap-1.5 transition"
+              >
+                <span>🎲 คำถามสุ่ม</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowPollModal(true)}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-medium border border-slate-700/60 shrink-0 flex items-center gap-1.5 transition"
+              >
+                <BarChart2 className="w-3.5 h-3.5 text-pink-400" />
+                <span>สร้างโพล</span>
+              </button>
+
+              <div className="h-4 w-px bg-slate-800 shrink-0" />
+
+              {/* Synced Room Effects Buttons */}
+              <div className="flex items-center gap-1 shrink-0">
+                <span className="text-[11px] text-slate-500 font-medium mr-1">Effect:</span>
+                <button
+                  type="button"
+                  onClick={() => handleTriggerEffect('hearts')}
+                  className="p-1.5 bg-slate-800 hover:bg-pink-500/20 rounded-lg text-xs transition"
+                  title="ส่งหัวใจ"
+                >
+                  ❤️
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleTriggerEffect('party')}
+                  className="p-1.5 bg-slate-800 hover:bg-pink-500/20 rounded-lg text-xs transition"
+                  title="ปาร์ตี้"
+                >
+                  🎉
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleTriggerEffect('sparkles')}
+                  className="p-1.5 bg-slate-800 hover:bg-pink-500/20 rounded-lg text-xs transition"
+                  title="ระยิบระยับ"
+                >
+                  ✨
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleTriggerEffect('fire')}
+                  className="p-1.5 bg-slate-800 hover:bg-pink-500/20 rounded-lg text-xs transition"
+                  title="ไฟลุก"
+                >
+                  🔥
+                </button>
+              </div>
+            </div>
+
+            {/* EMOJI PICKER POPUP */}
+            {showEmojiPicker && (
+              <div className="p-3 bg-slate-900 border-t border-slate-800 grid grid-cols-8 gap-2 shrink-0 animate-slide-in">
+                {EMOJI_LIST.map((emoji) => (
+                  <button
+                    key={emoji}
+                    type="button"
+                    onClick={() => {
+                      setMessageInput(prev => prev + emoji);
+                      setShowEmojiPicker(false);
+                    }}
+                    className="p-2 hover:bg-slate-800 rounded-xl text-lg text-center transition"
+                  >
+                    {emoji}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* INPUT CHAT FORM */}
+            <form onSubmit={handleSendMessage} className="p-3 bg-slate-900 border-t border-slate-800 flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                className="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-2xl transition shrink-0"
+                title="เลือก Emoji"
+              >
+                <Smile className="w-5 h-5" />
+              </button>
+
+              <input
+                type="text"
+                placeholder="พิมพ์ข้อความคุยกับเพื่อน..."
+                value={messageInput}
+                onChange={handleTyping}
+                className="flex-1 bg-slate-800/80 border border-slate-700 focus:border-pink-500 focus:ring-2 focus:ring-pink-500/20 rounded-2xl px-4 py-2.5 text-white placeholder-slate-500 text-sm outline-none transition"
+              />
+
+              <button
+                type="submit"
+                disabled={!messageInput.trim()}
+                className="p-2.5 bg-gradient-to-r from-blue-600 to-pink-600 hover:from-blue-500 hover:to-pink-500 disabled:opacity-40 text-white rounded-2xl shadow-lg transition shrink-0 flex items-center justify-center"
+              >
+                <Send className="w-5 h-5" />
+              </button>
+            </form>
+          </div>
+        )}
+
+      </main>
+
+      {/* MODAL: CREATE POLL */}
+      {showPollModal && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 w-full max-w-md shadow-2xl space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                <BarChart2 className="w-5 h-5 text-pink-400" />
+                <span>สร้างโพลสำรวจ</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowPollModal(false)}
+                className="text-slate-400 hover:text-white p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-400 mb-1">คำถาม</label>
+              <input
+                type="text"
+                placeholder="เช่น เลิกงานแล้วกินอะไรดี?"
+                value={pollQuestion}
+                onChange={(e) => setPollQuestion(e.target.value)}
+                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2.5 text-sm text-white outline-none focus:border-pink-500"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-xs font-semibold text-slate-400">ตัวเลือก</label>
+              {pollOptions.map((opt, idx) => (
+                <input
+                  key={idx}
+                  type="text"
+                  placeholder={`ตัวเลือกที่ ${idx + 1}`}
+                  value={opt}
+                  onChange={(e) => {
+                    const newOpts = [...pollOptions];
+                    newOpts[idx] = e.target.value;
+                    setPollOptions(newOpts);
+                  }}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-white outline-none focus:border-pink-500"
+                />
+              ))}
+
+              {pollOptions.length < 5 && (
+                <button
+                  type="button"
+                  onClick={() => setPollOptions([...pollOptions, ''])}
+                  className="text-xs text-pink-400 hover:underline pt-1 inline-block"
+                >
+                  + เพิ่มตัวเลือก
+                </button>
+              )}
+            </div>
+
+            <div className="flex gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowPollModal(false)}
+                className="flex-1 py-2.5 bg-slate-800 text-slate-300 rounded-xl text-sm font-semibold hover:bg-slate-700"
+              >
+                ยกเลิก
+              </button>
+              <button
+                type="button"
+                onClick={handleCreatePoll}
+                className="flex-1 py-2.5 bg-pink-600 text-white rounded-xl text-sm font-semibold hover:bg-pink-500"
+              >
+                สร้างโพล
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: MEMBERS ONLINE LIST DRAWER */}
+      {showMembersDrawer && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 w-full max-w-sm shadow-2xl space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                <Users className="w-5 h-5 text-emerald-400" />
+                <span>สมาชิกออนไลน์ ({presenceList.length})</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowMembersDrawer(false)}
+                className="text-slate-400 hover:text-white p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-2 max-h-60 overflow-y-auto">
+              {presenceList.map((m) => (
+                <div key={m.id} className="flex items-center justify-between p-2.5 bg-slate-800/60 rounded-xl border border-slate-700/50">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-sm" />
+                    <span className="text-sm font-medium text-white">{m.name}</span>
+                    {m.userId === userId && <span className="text-[10px] bg-pink-500/20 text-pink-300 px-1.5 py-0.5 rounded">คุณ</span>}
+                  </div>
+                  {m.isTyping && <span className="text-[10px] text-pink-400 italic">กำลังพิมพ์...</span>}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: LEAVE ROOM CONFIRMATION */}
+      {showLeaveModal && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 w-full max-w-sm shadow-2xl space-y-4 text-center">
+            <div className="w-12 h-12 bg-red-500/10 text-red-400 rounded-2xl flex items-center justify-center mx-auto">
+              <LogOut className="w-6 h-6" />
+            </div>
+            <h3 className="text-lg font-bold text-white">ต้องการออกจากห้องหรือไม่?</h3>
+            <p className="text-xs text-slate-400">
+              คุณสามารถกลับเข้าห้องเดิมได้เสมอโดยใช้ Room Code: <span className="text-pink-400 font-mono">{currentRoom?.code}</span>
+            </p>
+
+            <div className="flex gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowLeaveModal(false)}
+                className="flex-1 py-2.5 bg-slate-800 text-slate-300 rounded-xl text-sm font-semibold hover:bg-slate-700"
+              >
+                ยกเลิก
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmLeave}
+                className="flex-1 py-2.5 bg-red-600 text-white rounded-xl text-sm font-semibold hover:bg-red-500"
+              >
+                ออกจากห้อง
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: ROOM SETTINGS / INFO */}
+      {showSettingsModal && currentRoom && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 w-full max-w-sm shadow-2xl space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-bold text-white">ข้อมูลห้องแชท</h3>
+              <button
+                type="button"
+                onClick={() => setShowSettingsModal(false)}
+                className="text-slate-400 hover:text-white p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs text-slate-300 bg-slate-800/60 p-4 rounded-2xl border border-slate-700/50">
+              <div>
+                <span className="text-slate-500 block mb-0.5">ชื่อห้อง:</span>
+                <span className="font-semibold text-white text-sm">{currentRoom.name}</span>
+              </div>
+              <div>
+                <span className="text-slate-500 block mb-0.5">Room Code:</span>
+                <span className="font-mono text-pink-400 font-bold text-sm">{currentRoom.code}</span>
+              </div>
+              <div>
+                <span className="text-slate-500 block mb-0.5">ผู้สร้างห้อง:</span>
+                <span className="text-white">{currentRoom.createdByName}</span>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleCopyInviteLink}
+              className="w-full py-2.5 bg-pink-600 text-white rounded-xl text-sm font-semibold hover:bg-pink-500 flex items-center justify-center gap-2"
+            >
+              <Copy className="w-4 h-4" />
+              <span>คัดลอกลิงก์เชิญห้องนี้</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}
